@@ -2,8 +2,7 @@
 #![cfg_attr(not(feature = "export-abi"), no_main)]
 extern crate alloc;
 
-use alloy_primitives::{Address, FixedBytes, U128, U16, U8};
-use ethers::core::k256::ecdsa;
+use alloy_primitives::{Address, FixedBytes, U128, U32, U64, U16, U8};
 // use ethers::core::k256::ecdsa;
 use parity_scale_codec::{Compact, CompactAs, Decode, Encode, EncodeAppend, Error, HasCompact};
 use stylus_sdk::crypto::keccak;
@@ -235,9 +234,9 @@ impl LightClient {
         // the signature of senderPublicKey on the commitmentHash
         let commitement_hash = keccak(commitment.encode());
         let proof = ValidatorProof::from(proof);
-        let signature = ecdsa::Signature::from_scalars(proof.r, proof.s).map_err(|e| {
-            Err("InvalidSignature".as_bytes().to_vec());
-        })?;
+        // let signature = ecdsa::Signature::from_scalars(proof.r, proof.s).map_err(|e| {
+        //     Err("InvalidSignature".as_bytes().to_vec());
+        // })?;
         // secp256k1::recover(&commitement_hash, &proof[0], &proof[1], &proof[2]);
         // let commitement_hash = keccak(commitment)
         //         bytes32 commitmentHash = keccak256(encodeCommitment(commitment));
@@ -260,6 +259,35 @@ impl LightClient {
         //             prevRandao: 0,
         //             bitfieldHash: keccak256(abi.encodePacked(bitfield))
         //         });
+        Ok(())
+    }
+
+    pub fn validate_ticket(&self, ticket_id: FixedBytes<32>, commitment: CommitmentTuple, bitfield: Vec<U256>) -> Result<(), Vec<u8>> {
+
+        let ticket = self.tickets.get(ticket_id);
+        let commitment: Commitment = commitment.into();
+
+        if *ticket.block_number == U64::from(0) {
+            // submitInitial hasn't been called yet
+            return Err(b"InvalidTicket".to_vec())
+        }
+
+        if *ticket.prev_randao == U256::from(0) {
+            // commitPrevRandao hasn't been called yet
+            return Err(b"PrevRandaoNotCaptured".to_vec())
+        }
+
+        if U64::from(commitment.block_number) <= self.latest_beefy_block.get() {
+            // ticket is obsolete
+            return Err(b"StaleCommitment".to_vec())
+        }
+        // TODO: Actually hash the bitfields not a random zero byte array
+        if *ticket.bitfield_hash != keccak([0]) {
+            // The provided claims bitfield isn't the same one that was
+            // passed to submitInitial
+            return Err(b"InvalidBitfield".to_vec())
+        }
+
         Ok(())
     }
 }
