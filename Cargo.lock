@@ -2970,6 +2970,7 @@ dependencies = [
  "ethers",
  "eyre",
  "hex",
+ "parity-scale-codec",
  "stylus-sdk",
  "tokio",
  "wee_alloc",

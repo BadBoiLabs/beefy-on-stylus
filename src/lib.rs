@@ -2,12 +2,16 @@
 #![cfg_attr(not(feature = "export-abi"), no_main)]
 extern crate alloc;
 
-use alloy_primitives::FixedBytes;
+use alloy_primitives::{Address, FixedBytes, U128, U16, U8};
+use ethers::core::k256::ecdsa;
+// use ethers::core::k256::ecdsa;
+use parity_scale_codec::{Compact, CompactAs, Decode, Encode, EncodeAppend, Error, HasCompact};
+use stylus_sdk::crypto::keccak;
 use stylus_sdk::storage::{
     StorageFixedBytes, StorageKey, StorageMap, StorageU128, StorageU16, StorageU256, StorageU32,
     StorageU64, StorageU8, StorageVec,
 };
-
+use alloy_sol_types::sol_data::Uint;
 use stylus_sdk::abi::AbiType;
 
 /// Initializes a custom, global allocator for Rust programs compiled to WASM.
@@ -23,8 +27,8 @@ type CommitmentTuple = (u32, u64, Vec<PayloadItemTuple>);
 impl From<CommitmentTuple> for Commitment {
     fn from(value: CommitmentTuple) -> Self {
         Commitment {
-            blockNumber: value.0,
-            validatorSetID: value.1,
+            block_number: value.0,
+            validator_set_id: value.1,
             payload: value.2.into_iter().map(|v| PayloadItem::from(v)).collect(),
         }
     }
@@ -33,7 +37,7 @@ impl From<CommitmentTuple> for Commitment {
 impl From<PayloadItemTuple> for PayloadItem {
     fn from(value: PayloadItemTuple) -> Self {
         PayloadItem {
-            payloadID: value.0,
+            payload_id: value.0,
             data: value.1,
         }
     }
@@ -44,95 +48,218 @@ impl From<PayloadItemTuple> for PayloadItem {
  * past blocks and parachain blocks and can be used to verify both polkadot and parachain blocks.
  */
 
-struct Commitment {
+pub struct Commitment {
     // Relay chain block number
-    blockNumber: u32,
+    block_number: u32,
     // ID of the validator set that signed the commitment
-    validatorSetID: u64,
+    validator_set_id: u64,
     // The payload of the new commitment in beefy justifications (in
     // our case, this is a new MMR root for all past polkadot blocks)
     payload: Vec<PayloadItem>,
 }
 
+impl Commitment {
+    pub fn encode(&self) -> Vec<u8> {
+        let mut result = Vec::new();
+        Encode::encode_to(&(self.payload.len() as u32), &mut result);
+        self.payload.iter().for_each(|p| {
+            let mut p = p.encode();
+            result.append(&mut p);
+        });
+        Encode::encode_to(&self.block_number, &mut result);
+        Encode::encode_to(&self.validator_set_id, &mut result);
+        result
+    }
+}
+
 /**
  * @dev Each PayloadItem is a piece of data signed by validators at a particular block.
  */
-struct PayloadItem {
+pub struct PayloadItem {
     // An ID that references a description of the data in the payload item.
     // Known payload ids can be found [upstream](https://github.com/paritytech/substrate/blob/fe1f8ba1c4f23931ae89c1ada35efb3d908b50f5/primitives/consensus/beefy/src/payload.rs#L27).
-    payloadID: [u8; 2],
+    pub payload_id: [u8; 2],
     // The contents of the payload item
-    data: Vec<u8>,
+    pub data: Vec<u8>,
+}
+
+impl PayloadItem {
+    pub fn encode(&self) -> Vec<u8> {
+        let mut result = Vec::new();
+        let mut payload_id = self.payload_id.to_vec();
+        result.append(&mut payload_id);
+        Encode::encode_to(&(self.data.len() as u32), &mut result);
+        let mut data = self.data.clone();
+        result.append(&mut data);
+        result
+    }
 }
 
 /**
  * @dev The ValidatorSetState describes a BEEFY validator set along with signature usage counters
  */
 #[solidity_storage]
-
-struct ValidatorSetState {
+pub struct ValidatorSetState {
     // Identifier for the set
-    id: StorageU128,
+    pub id: StorageU128,
     // Number of validators in the set
-    length: StorageU128,
+    pub length: StorageU128,
     // Merkle root of BEEFY validator addresses
-    root: StorageFixedBytes<32>,
+    pub root: StorageFixedBytes<32>,
     // Number of times a validator signature has been used
-    usage_counters: StorageVec<StorageU16>,
+    pub usage_counters: StorageVec<StorageU16>,
 }
 
 #[solidity_storage]
-struct ValidatorSet {
+pub struct ValidatorSet {
     // Identifier for the set
-    id: StorageU128,
+    pub id: StorageU128,
     // Number of validators in the set
-    length: StorageU128,
+    pub length: StorageU128,
     // Merkle root of BEEFY validator addresses
-    root: StorageFixedBytes<32>,
+    pub root: StorageFixedBytes<32>,
 }
 #[solidity_storage]
 
-struct Ticket {
+pub struct Ticket {
     // The block number this ticket was issued
-    blockNumber: StorageU64,
+    pub block_number: StorageU64,
     // Length of the validator set that signed the commitment
-    validatorSetLen: StorageU32,
+    pub validator_set_len: StorageU32,
     // The number of signatures required
-    numRequiredSignatures: StorageU32,
+    pub num_required_signatures: StorageU32,
     // The PREVRANDAO seed selected for this ticket session
-    prevRandao: StorageU256,
+    pub prev_randao: StorageU256,
     // Hash of a bitfield claiming which validators have signed
-    bitfieldHash: StorageFixedBytes<32>,
+    pub bitfield_hash: StorageFixedBytes<32>,
+}
+
+struct ValidatorProof {
+    // The parity bit to specify the intended solution
+    v: u8,
+    // The x component on the secp256k1 curve
+    r: [u8; 32],
+    // The challenge solution
+    s: [u8; 32],
+    // Leaf index of the validator address in the merkle tree
+    index: U256,
+    // Validator address
+    account: Address,
+    // Merkle proof for the validator
+    proof: Vec<[u8; 32]>,
+}
+type ValidatorProofTuple = (u8, [u8; 32], [u8; 32], U256, Address, Vec<[u8; 32]>);
+impl From<ValidatorProofTuple> for ValidatorProof {
+    fn from(value: ValidatorProofTuple) -> Self {
+        ValidatorProof {
+            v: value.0,
+            r: value.1,
+            s: value.2,
+            index: value.3,
+            account: value.4,
+            proof: value.5,
+        }
+    }
 }
 #[solidity_storage]
 pub struct LightClient {
     // /// @dev The latest verified MMR root
     // bytes32 public latestMMRRoot;
-    latest_mmr_root: StorageFixedBytes<32>,
+    pub latest_mmr_root: StorageFixedBytes<32>,
 
     // /// @dev The block number in the relay chain in which the latest MMR root was emitted
     // uint64 public latestBeefyBlock;
-    latest_beefy_block: StorageU64,
+    pub latest_beefy_block: StorageU64,
 
     // /// @dev State of the current validator set
-    current_validator_set: ValidatorSetState,
+    pub current_validator_set: ValidatorSetState,
     // /// @dev State of the next validator set
-    next_velidator_set: ValidatorSetState,
+    pub next_validator_set: ValidatorSetState,
 
     // /// @dev Pending tickets for commitment submission
     // mapping(bytes32 ticketID => Ticket) public tickets;
-    tickets: StorageMap<FixedBytes<32>, Ticket>,
+    pub tickets: StorageMap<FixedBytes<32>, Ticket>,
 }
 #[external]
 impl LightClient {
     pub fn submit_initial(
-        &self,
+        &mut self,
         commitment: CommitmentTuple,
         bitfield: Vec<U256>,
-        proof: Vec<U256>,
+        proof: ValidatorProofTuple,
     ) -> Result<(), Vec<u8>> {
         let commitment = Commitment::from(commitment);
+        // let mut vset = ValidatorSetState::default();
+        let (signature_usage_count, vset) =
+            if U128::from(commitment.validator_set_id) == *self.current_validator_set.id {
+                let signature_usage_count = self
+                    .current_validator_set
+                    .usage_counters
+                    .get(1 as usize)
+                    .ok_or("ERROR".as_bytes().to_vec())?;
+                let mut setter = self
+                    .current_validator_set
+                    .usage_counters
+                    // TODO: Saturating add
+                    .setter(1 as usize)
+                    .ok_or("ERROR".as_bytes().to_vec())?;
+                setter.set(signature_usage_count + U16::from(1));
+                // vset = currentValidatorSet;
+                (signature_usage_count, &self.current_validator_set)
+            } else if U128::from(commitment.validator_set_id) == *self.next_validator_set.id {
+                let signature_usage_count = self
+                    .next_validator_set
+                    .usage_counters
+                    .get(1 as usize)
+                    .ok_or("ERROR".as_bytes().to_vec())?;
+                let mut setter = self
+                    .next_validator_set
+                    .usage_counters
+                    // TODO: Saturating add
+                    .setter(1 as usize)
+                    .ok_or("ERROR".as_bytes().to_vec())?;
+                setter.set(signature_usage_count + U16::from(1));
+                // vset = nextValidatorSet;
+                (signature_usage_count, &self.next_validator_set)
+            } else {
+                return Err("InvalidCommitment".as_bytes().to_vec());
+            };
+        // Check if merkle proof is valid based on the validatorSetRoot and if proof is included in bitfield
+        //  if (!isValidatorInSet(vset, proof.account, proof.index, proof.proof) || !Bitfield.isSet(bitfield, proof.index))
 
+        if U128::from(commitment.validator_set_id) != *vset.id {
+            return Err("InvalidCommitment".as_bytes().to_vec());
+        }
+
+        // Check if validatorSignature is correct, ie. check if it matches
+        // the signature of senderPublicKey on the commitmentHash
+        let commitement_hash = keccak(commitment.encode());
+        let proof = ValidatorProof::from(proof);
+        let signature = ecdsa::Signature::from_scalars(proof.r, proof.s).map_err(|e| {
+            Err("InvalidSignature".as_bytes().to_vec());
+        })?;
+        // secp256k1::recover(&commitement_hash, &proof[0], &proof[1], &proof[2]);
+        // let commitement_hash = keccak(commitment)
+        //         bytes32 commitmentHash = keccak256(encodeCommitment(commitment));
+        //         if (ECDSA.recover(commitmentHash, proof.v, proof.r, proof.s) != proof.account) {
+        //             revert InvalidSignature();
+        //         }
+
+        //         // For the initial submission, the supplied bitfield should claim that more than
+        //         // two thirds of the validator set have sign the commitment
+        //         if (Bitfield.countSetBits(bitfield) < computeQuorum(vset.length)) {
+        //             revert NotEnoughClaims();
+        //         }
+
+        //         tickets[createTicketID(msg.sender, commitmentHash)] = Ticket({
+        //             blockNumber: uint64(block.number),
+        //             validatorSetLen: uint32(vset.length),
+        //             numRequiredSignatures: uint32(
+        //                 computeNumRequiredSignatures(vset.length, signatureUsageCount, minNumRequiredSignatures)
+        //                 ),
+        //             prevRandao: 0,
+        //             bitfieldHash: keccak256(abi.encodePacked(bitfield))
+        //         });
         Ok(())
     }
 }
