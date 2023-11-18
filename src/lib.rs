@@ -2,12 +2,13 @@
 #![cfg_attr(not(feature = "export-abi"), no_main)]
 extern crate alloc;
 
-use alloy_primitives::FixedBytes;
+use alloy_primitives::{FixedBytes, U32, U64, U8};
+use ethers::core::k256::sha2::digest::typenum::UInt;
 use stylus_sdk::storage::{
     StorageFixedBytes, StorageKey, StorageMap, StorageU128, StorageU16, StorageU256, StorageU32,
     StorageU64, StorageU8, StorageVec,
 };
-
+use stylus_sdk::crypto::keccak;
 use stylus_sdk::abi::AbiType;
 
 /// Initializes a custom, global allocator for Rust programs compiled to WASM.
@@ -132,6 +133,35 @@ impl LightClient {
         proof: Vec<U256>,
     ) -> Result<(), Vec<u8>> {
         let commitment = Commitment::from(commitment);
+
+        Ok(())
+    }
+
+    pub fn validate_ticket(&self, ticket_id: FixedBytes<32>, commitment: CommitmentTuple, bitfield: Vec<U256>) -> Result<(), Vec<u8>> {
+
+        let ticket = self.tickets.get(ticket_id);
+        let commitment: Commitment = commitment.into();
+
+        if *ticket.blockNumber == U64::from(0) {
+            // submitInitial hasn't been called yet
+            return Err(b"InvalidTicket".to_vec())
+        }
+
+        if *ticket.prevRandao == U256::from(0) {
+            // commitPrevRandao hasn't been called yet
+            return Err(b"PrevRandaoNotCaptured".to_vec())
+        }
+
+        if U64::from(commitment.blockNumber) <= self.latest_beefy_block.get() {
+            // ticket is obsolete
+            return Err(b"StaleCommitment".to_vec())
+        }
+        // TODO: Actually hash the bitfields not a random zero byte array
+        if *ticket.bitfieldHash != keccak([0]) {
+            // The provided claims bitfield isn't the same one that was
+            // passed to submitInitial
+            return Err(b"InvalidBitfield".to_vec())
+        }
 
         Ok(())
     }
